@@ -5,25 +5,38 @@ from langchain_core.prompts import PromptTemplate
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.runnables import RunnableLambda
 
-# Ensure API keys are set
-if "TAVILY_API_KEY" not in os.environ:
-    raise ValueError("TAVILY_API_KEY not found. Set it as an environment variable.")
 
-# Initialize Tavily search tool
+if "TAVILY_API_KEY" not in os.environ:
+    raise ValueError("TAVILY_API_KEY not found.")
+
+
 search_tool = TavilySearchResults()
 
 def research_agent(inputs):
-    """Agent to perform research using Tavily."""
-    query = inputs["query"]  # Extract query from inputs
-    results = search_tool.invoke(query)
+    
+    query = inputs.get("query", "")
+    print(f"\nresearch_agent received query: {query}")
 
-    if not results:
-        print("[ERROR] No research results found!")
+    if not query.strip():
+        print("research_agent received an empty query.")
+        return {"query": query, "research_results": "Invalid query."}
+
+    try:
+        results = search_tool.invoke(query)
+    except Exception as e:
+        print(f"Tavily API call failed: {e}")
+        return {"query": query, "research_results": "Error retrieving research results."}
+
+    if not results or not isinstance(results, list):
+        print("No research results found!")
         return {"query": query, "research_results": "No relevant results found."}
 
     research_results = "\n\n".join([res.get("content", "No content available") for res in results])
-    print("\n[DEBUG] Research Results:\n", research_results)
-    return {"query": query, "research_results": research_results}  
+    print(f"\nresearch_agent returning results:\n{research_results[:500]}")  # Limit output size
+    
+    return {"query": query, "research_results": research_results}
+
+ 
 
 # Initialize Ollama LLM
 llm = OllamaLLM(model="mistral")
@@ -37,57 +50,72 @@ answer_prompt = PromptTemplate(
     {research_results}
     """
 )
+
 def answer_drafting_agent(inputs):
     """Agent to generate an answer based on research results."""
-    query = inputs["query"]
-    research_results = inputs["research_results"]
+    print(f"\n[DEBUG] answer_drafting_agent received inputs:\n{inputs}")
+
+    query = inputs.get("query", "")
+    research_results = inputs.get("research_results", "")
 
     if not research_results.strip():
-        print("[ERROR] No research results provided to the answer drafting agent!")
+        print("No research results provided to the answer drafting agent!")
         return {"drafted_answer": "Unable to generate an answer due to lack of research data."}
 
     prompt = answer_prompt.format(query=query, research_results=research_results)
     
-    print("\n[DEBUG] Sending prompt to LLM:\n", prompt)  # Debugging step
+    print("\nSending prompt to LLM:\n", prompt[:500])  # Limit output size
 
     try:
         response = llm.invoke(prompt)
-        print("\n[DEBUG] LLM Raw Response:\n", response)  # Debugging step
+        print("\nLLM Raw Response:\n", response[:500])  # Limit output size
 
-        if response is None:
-            print("[ERROR] LLM response is None!")
+        if response is None or not isinstance(response, str):
+            print("LLM response is invalid!")
             return {"drafted_answer": "Failed to generate an answer."}
 
-        return {"drafted_answer": response}
+        return {"drafted_answer": response.strip()}  # Ensure clean output
 
     except Exception as e:
-        print(f"[ERROR] LLM invocation failed: {e}")
+        print(f"LLM invocation failed: {e}")
         return {"drafted_answer": "An error occurred during answer generation."}
 
-# Create a LangGraph workflow
+
+# Create a LangGraph workfow
 graph = Graph()
-graph.add_node("research_agent", RunnableLambda(research_agent))
-graph.add_node("answer_drafting_agent", RunnableLambda(answer_drafting_agent))
+
+# Debugging wrapper to track node execution
+def debug_wrapper(func, name):
+    def wrapped(inputs):
+        print(f"\n[DEBUG] Executing {name} with inputs:\n{inputs}")
+        result = func(inputs)
+        print(f"\n[DEBUG] Output from {name}:\n{result}")
+        return result
+    return wrapped
+
+graph.add_node("research_agent", RunnableLambda(debug_wrapper(research_agent, "research_agent")))
+graph.add_node("answer_drafting_agent", RunnableLambda(debug_wrapper(answer_drafting_agent, "answer_drafting_agent")))
 
 graph.add_edge("research_agent", "answer_drafting_agent")
+
+# Set the final output node
 graph.set_entry_point("research_agent")
+graph.set_finish_point("answer_drafting_agent")  # ✅ Explicitly tell LangGraph where to stop
 
 workflow = graph.compile()
+
+
 def main():
-    query = "What are the latest advancements in artificial intelligence?"
+    query = input("Enter your query: ")
     result = workflow.invoke({"query": query})
+    f=open("answer.txt","w")
+    f.write(result["drafted_answer"])
+    f.close()
 
-    print("\n[DEBUG] Workflow Output:\n", result)  # Ensure it contains the expected keys
 
-    if "drafted_answer" not in result or not result["drafted_answer"]:
-        print("[ERROR] Answer drafting failed. No valid answer returned.")
-        return
-
-    print("\nGenerated Answer:\n", result["drafted_answer"])
 
 
 if __name__ == "__main__":
     main()
-
 
 
